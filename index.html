@@ -244,21 +244,24 @@
             
             <div class="card">
                 <div style="text-align: center; font-size: 12px; color: #666; margin-bottom: 10px;">
-                    Kale beursprijs (excl. belastingen, BTW, opslag)
+                    Relatief over alle 4 dagen (voor optimale vergelijking)
                 </div>
                 <div class="legend">
                     <div class="legend-item">
                         <div class="legend-color" style="background: linear-gradient(180deg, #10b981 0%, #059669 100%);"></div>
-                        <span>Laag (&lt;€0,12)</span>
+                        <span>Goedkoop (beste 33%)</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);"></div>
-                        <span>Gemiddeld (€0,12-€0,20)</span>
+                        <span>Middel</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background: linear-gradient(180deg, #ef4444 0%, #dc2626 100%);"></div>
-                        <span>Hoog (&gt;€0,20)</span>
+                        <span>Duur (duurste 33%)</span>
                     </div>
+                </div>
+                <div style="text-align: center; font-size: 11px; color: #666; margin-top: 10px;">
+                    💡 Tip: Hover over een balk voor exacte prijs
                 </div>
             </div>
             
@@ -271,8 +274,91 @@
         const LAT = 52.0907;
         const LON = 5.1214;
         
-        // Baseprijs winter (feb 2026)
+        // ENTSO-E API key (moet je aanvragen - zie instructies)
+        const ENTSOE_API_KEY = localStorage.getItem('entsoe_api_key') || '';
+        
+        // Baseprijs winter (feb 2026) - voor voorspelling
         const BASE_PRICE = 0.15;
+        
+        async function fetchDayAheadPrices() {
+            if (!ENTSOE_API_KEY) {
+                console.log('Geen ENTSO-E API key, gebruik voorspelling');
+                return null;
+            }
+            
+            try {
+                // ENTSO-E gebied code voor Nederland
+                const DOMAIN = '10YNL----------L';
+                
+                // Vandaag 00:00 tot overmorgen 23:59
+                const now = new Date();
+                const start = new Date(now);
+                start.setHours(0, 0, 0, 0);
+                const end = new Date(start);
+                end.setDate(end.getDate() + 2);
+                end.setHours(23, 59, 59, 999);
+                
+                // ENTSO-E date format: YYYYMMDDHHMM
+                const formatDate = (d) => {
+                    const pad = (n) => String(n).padStart(2, '0');
+                    return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}`;
+                };
+                
+                const url = `https://web-api.tp.entsoe.eu/api?` +
+                    `securityToken=${ENTSOE_API_KEY}` +
+                    `&documentType=A44` +
+                    `&in_Domain=${DOMAIN}` +
+                    `&out_Domain=${DOMAIN}` +
+                    `&periodStart=${formatDate(start)}` +
+                    `&periodEnd=${formatDate(end)}`;
+                
+                console.log('Fetching ENTSO-E data...');
+                const response = await fetch(url);
+                
+                if (!response.ok) {
+                    console.log('ENTSO-E API fout:', response.status);
+                    return null;
+                }
+                
+                const text = await response.text();
+                const parser = new DOMParser();
+                const xml = parser.parseFromString(text, 'text/xml');
+                
+                // Parse XML voor prijzen
+                const timeSeries = xml.querySelector('TimeSeries');
+                if (!timeSeries) {
+                    console.log('Geen TimeSeries in response');
+                    return null;
+                }
+                
+                const periods = timeSeries.querySelectorAll('Period');
+                const prices = {};
+                
+                periods.forEach(period => {
+                    const startTime = period.querySelector('timeInterval start').textContent;
+                    const points = period.querySelectorAll('Point');
+                    
+                    points.forEach(point => {
+                        const position = parseInt(point.querySelector('position').textContent);
+                        const price = parseFloat(point.querySelector('price.amount').textContent) / 1000; // MWh -> kWh
+                        
+                        // Bereken timestamp
+                        const date = new Date(startTime);
+                        date.setHours(date.getHours() + position - 1);
+                        const timeKey = date.toISOString().split('.')[0] + 'Z';
+                        
+                        prices[timeKey] = price;
+                    });
+                });
+                
+                console.log('ENTSO-E prijzen opgehaald:', Object.keys(prices).length, 'uren');
+                return prices;
+                
+            } catch (error) {
+                console.error('Fout bij ophalen ENTSO-E data:', error);
+                return null;
+            }
+        }
         
         async function fetchWeatherData() {
             try {
@@ -378,12 +464,14 @@
             return `${date.getDate()}/${date.getMonth() + 1}`;
         }
         
-        function renderCharts(weatherData) {
+        function renderCharts(weatherData, dayAheadPrices) {
             const chartsContainer = document.getElementById('charts');
             chartsContainer.innerHTML = '';
             
-            // Groepeer data per dag
+            // Groepeer data per dag en verzamel alle prijzen
             const dayData = {};
+            const allPrices = [];
+            
             weatherData.hourly.time.forEach((time, i) => {
                 const date = time.split('T')[0];
                 if (!dayData[date]) {
@@ -391,23 +479,50 @@
                         hours: [],
                         cloudCover: [],
                         windSpeed: [],
-                        prices: []
+                        prices: [],
+                        sources: [] // 'day-ahead' of 'forecast'
                     };
                 }
                 
                 const dateObj = new Date(time);
                 const isWeekend = dateObj.getDay() === 0 || dateObj.getDay() === 6;
-                const price = calculatePrice(
-                    time,
-                    weatherData.hourly.cloud_cover[i],
-                    weatherData.hourly.wind_speed_10m[i],
-                    isWeekend
-                );
+                
+                // Check of we day-ahead prijs hebben
+                let price;
+                let source;
+                const timeKey = time.split('.')[0] + 'Z';
+                
+                if (dayAheadPrices && dayAheadPrices[timeKey]) {
+                    price = dayAheadPrices[timeKey];
+                    source = 'day-ahead';
+                } else {
+                    price = calculatePrice(
+                        time,
+                        weatherData.hourly.cloud_cover[i],
+                        weatherData.hourly.wind_speed_10m[i],
+                        isWeekend
+                    );
+                    source = 'forecast';
+                }
                 
                 dayData[date].hours.push(time);
                 dayData[date].cloudCover.push(weatherData.hourly.cloud_cover[i]);
                 dayData[date].windSpeed.push(weatherData.hourly.wind_speed_10m[i]);
                 dayData[date].prices.push(price);
+                dayData[date].sources.push(source);
+                allPrices.push(price);
+            });
+            
+            // Bereken drempelwaarden voor relatieve labels over ALLE dagen
+            const sortedPrices = [...allPrices].sort((a, b) => a - b);
+            const lowThreshold = sortedPrices[Math.floor(sortedPrices.length * 0.33)];
+            const highThreshold = sortedPrices[Math.floor(sortedPrices.length * 0.67)];
+            
+            console.log('Drempelwaarden:', {
+                low: lowThreshold.toFixed(3),
+                high: highThreshold.toFixed(3),
+                min: Math.min(...allPrices).toFixed(3),
+                max: Math.max(...allPrices).toFixed(3)
             });
             
             // Render elke dag
@@ -417,6 +532,7 @@
                 const avgWind = day.windSpeed.reduce((a, b) => a + b, 0) / day.windSpeed.length;
                 const minPrice = Math.min(...day.prices);
                 const maxPrice = Math.max(...day.prices);
+                const hasDayAhead = day.sources.some(s => s === 'day-ahead');
                 
                 const card = document.createElement('div');
                 card.className = 'card';
@@ -425,11 +541,19 @@
                                dayIndex === 1 ? 'Morgen' : 
                                getDayName(date);
                 
+                const sourceLabel = hasDayAhead ? 
+                    '✓ Echte prijzen (ENTSO-E)' : 
+                    '📊 Voorspelling (obv weer)';
+                
                 card.innerHTML = `
                     <div class="day-section">
                         <div class="day-header">
                             <span>${dayLabel}</span>
                             <span class="day-info">${formatDate(date)}</span>
+                        </div>
+                        
+                        <div style="text-align: center; font-size: 11px; color: ${hasDayAhead ? '#10b981' : '#667eea'}; margin-bottom: 10px;">
+                            ${sourceLabel}
                         </div>
                         
                         <div class="weather-info">
@@ -442,12 +566,12 @@
                                 <div class="weather-value">${Math.round(avgWind)} km/u</div>
                             </div>
                             <div class="weather-item">
-                                <div class="weather-label">📉 Min prijs</div>
-                                <div class="weather-value">€${minPrice.toFixed(2)}</div>
+                                <div class="weather-label">📉 Goedkoopst</div>
+                                <div class="weather-value">${minPrice.toFixed(2)} €/kWh</div>
                             </div>
                             <div class="weather-item">
-                                <div class="weather-label">📈 Max prijs</div>
-                                <div class="weather-value">€${maxPrice.toFixed(2)}</div>
+                                <div class="weather-label">📈 Duurst</div>
+                                <div class="weather-value">${maxPrice.toFixed(2)} €/kWh</div>
                             </div>
                         </div>
                         
@@ -463,23 +587,36 @@
                 const chartEl = document.getElementById(`chart-${dayIndex}`);
                 const hours24 = day.hours.slice(0, 24);
                 const prices24 = day.prices.slice(0, 24);
-                const maxHeight = Math.max(...prices24);
+                const sources24 = day.sources.slice(0, 24);
+                const maxHeight = Math.max(...allPrices); // Gebruik max over ALLE dagen
                 
                 hours24.forEach((time, i) => {
                     const hour = new Date(time).getHours();
                     const price = prices24[i];
+                    const source = sources24[i];
                     const height = (price / maxHeight) * 100;
                     
+                    // Relatieve classificatie
                     let barClass = 'bar';
-                    if (price < 0.12) barClass += ' low';
-                    else if (price > 0.20) barClass += ' high';
+                    let label = 'Middel';
+                    if (price <= lowThreshold) {
+                        barClass += ' low';
+                        label = 'Goedkoop';
+                    } else if (price >= highThreshold) {
+                        barClass += ' high';
+                        label = 'Duur';
+                    }
                     
                     const bar = document.createElement('div');
                     bar.className = barClass;
                     bar.style.height = `${height}%`;
                     bar.innerHTML = `
                         <div class="bar-label">${hour}u</div>
-                        <div class="bar-price">€${price.toFixed(2)}</div>
+                        <div class="bar-price">
+                            <strong>${label}</strong><br>
+                            €${price.toFixed(3)}/kWh<br>
+                            <span style="font-size: 9px; opacity: 0.8;">${source === 'day-ahead' ? 'Echt' : 'Voorspelling'}</span>
+                        </div>
                     `;
                     
                     chartEl.appendChild(bar);
@@ -498,19 +635,100 @@
                 })}`;
             
             try {
-                const weatherData = await fetchWeatherData();
+                // Parallel ophalen van weer en day-ahead data
+                const [weatherData, dayAheadPrices] = await Promise.all([
+                    fetchWeatherData(),
+                    fetchDayAheadPrices()
+                ]);
+                
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('content').style.display = 'block';
-                renderCharts(weatherData);
+                
+                // Update info banner met API key status
+                updateInfoBanner(dayAheadPrices !== null);
+                
+                renderCharts(weatherData, dayAheadPrices);
+                
             } catch (error) {
-                console.log('API niet bereikbaar, gebruik testmodus:', error);
-                // Automatisch naar testmodus als API niet werkt
+                console.log('Fout bij laden data:', error);
                 document.getElementById('loading').textContent = 
-                    '⚠️ API niet bereikbaar, gebruik demo-data...';
+                    '⚠️ Data niet beschikbaar, gebruik demo-data...';
                 setTimeout(() => {
                     document.getElementById('loading').style.display = 'none';
                     testMode();
                 }, 1000);
+            }
+        }
+        
+        function updateInfoBanner(hasApiKey) {
+            const infoEl = document.querySelector('.info');
+            if (!hasApiKey) {
+                infoEl.innerHTML = `
+                    <strong>⚠️ ENTSO-E API key ontbreekt</strong><br>
+                    Momenteel gebruik ik alleen voorspellingen obv weer. Voor echte day-ahead prijzen (vandaag/morgen):
+                    <br><br>
+                    <button onclick="showApiKeyInstructions()" style="padding: 8px 16px; background: #667eea; color: white; border: none; border-radius: 6px; cursor: pointer;">
+                        📝 Toon instructies voor API key
+                    </button>
+                    <br><br>
+                    <strong>💶 Prijzen:</strong> Kale beursprijzen (excl. BTW, energiebelasting €0,09/kWh, leveranciersopslag). 
+                    Je daadwerkelijke prijs is ongeveer 60-80% hoger. Bijv. €0,15 wordt ~€0,26 all-in.
+                    <br><br>
+                    <strong>Patroon:</strong> Veel zon/wind = lagere prijzen. Weinig zon/wind + avondspits = hogere prijzen.
+                `;
+            } else {
+                infoEl.innerHTML = `
+                    <strong>✅ ENTSO-E API actief</strong> - Vandaag en morgen gebruiken echte day-ahead prijzen (vanaf ~13:00 beschikbaar).
+                    <br><br>
+                    <strong>💶 Prijzen:</strong> Kale beursprijzen (excl. BTW, energiebelasting €0,09/kWh, leveranciersopslag). 
+                    Je daadwerkelijke prijs is ongeveer 60-80% hoger. Bijv. €0,15 wordt ~€0,26 all-in.
+                    <br><br>
+                    <strong>Labels:</strong> Goedkoop/Middel/Duur zijn relatief over alle 4 dagen. Zo kun je optimaal vergelijken.
+                `;
+            }
+        }
+        
+        function showApiKeyInstructions() {
+            const modal = document.createElement('div');
+            modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;';
+            modal.innerHTML = `
+                <div style="background: white; border-radius: 16px; padding: 30px; max-width: 600px; max-height: 80vh; overflow-y: auto;">
+                    <h2 style="margin-top: 0;">🔑 ENTSO-E API Key aanvragen</h2>
+                    
+                    <p><strong>Stap 1:</strong> Registreer op <a href="https://transparency.entsoe.eu/usrm/user/createPublicUser" target="_blank" style="color: #667eea;">ENTSO-E Transparency Platform</a></p>
+                    
+                    <p><strong>Stap 2:</strong> Stuur email naar <strong>transparency@entsoe.eu</strong> met:</p>
+                    <ul>
+                        <li>Onderwerp: "Restful API access"</li>
+                        <li>Inhoud: "I would like to request API access for personal use. My registered email is: [jouw email]"</li>
+                    </ul>
+                    
+                    <p><strong>Stap 3:</strong> Wacht 1-3 dagen op email met API key</p>
+                    
+                    <p><strong>Stap 4:</strong> Voer je API key hieronder in (wordt lokaal opgeslagen):</p>
+                    
+                    <input type="text" id="apiKeyInput" placeholder="Plak hier je API key" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px; margin-bottom: 15px;">
+                    
+                    <div style="display: flex; gap: 10px;">
+                        <button onclick="saveApiKey()" style="flex: 1; padding: 12px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600;">
+                            Opslaan en herladen
+                        </button>
+                        <button onclick="this.closest('div').parentElement.parentElement.remove()" style="flex: 1; padding: 12px; background: #6b7280; color: white; border: none; border-radius: 6px; cursor: pointer;">
+                            Sluiten
+                        </button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        }
+        
+        function saveApiKey() {
+            const key = document.getElementById('apiKeyInput').value.trim();
+            if (key) {
+                localStorage.setItem('entsoe_api_key', key);
+                location.reload();
+            } else {
+                alert('Voer een geldige API key in');
             }
         }
         
@@ -548,22 +766,32 @@
             const infoEl = document.querySelector('.info');
             infoEl.innerHTML = `
                 <strong>🧪 DEMO MODUS</strong> - Echte weer-API niet bereikbaar. Dit zijn voorbeeldgegevens.<br><br>
-                <strong>💶 Prijzen:</strong> Dit zijn kale beursprijzen (excl. BTW, energiebelasting €0,09/kWh, leveranciersopslag). 
+                <strong>💶 Prijzen:</strong> Kale beursprijzen (excl. BTW, energiebelasting €0,09/kWh, leveranciersopslag). 
                 Je daadwerkelijke prijs is ongeveer 60-80% hoger. Bijv. €0,15 wordt ~€0,26 all-in.
                 <br><br>
-                <strong>Patroon:</strong> Veel zon/wind = lagere prijzen. Weinig zon/wind + avondspits = hogere prijzen.
+                <strong>Labels:</strong> Goedkoop/Middel/Duur zijn relatief over alle 4 dagen.
             `;
             
             document.getElementById('updateTime').textContent = 
                 `Demo modus - ${now.toLocaleString('nl-NL', { day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
-            renderCharts(dummyData);
+            renderCharts(dummyData, null);
         }
         
         // Start bij laden pagina
         init();
         
-        // Auto-refresh elke 30 minuten
-        setInterval(init, 30 * 60 * 1000);
+        // Check elke 30 minuten of het tijd is voor update (rond 8u en 18u)
+        setInterval(() => {
+            const now = new Date();
+            const hour = now.getHours();
+            const minute = now.getMinutes();
+            
+            // Update rond 8:00 of 18:00 (±15 min)
+            if ((hour === 8 || hour === 18) && minute < 30) {
+                console.log('Geplande update uitgevoerd');
+                init();
+            }
+        }, 30 * 60 * 1000);
     </script>
 </body>
 </html>
