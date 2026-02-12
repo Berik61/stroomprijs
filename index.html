@@ -242,6 +242,9 @@
                 </div>
             </div>
             
+            <!-- Beste tijdblokken -->
+            <div id="bestTimes" class="card" style="display: none;"></div>
+            
             <div class="card">
                 <div style="text-align: center; font-size: 12px; color: #666; margin-bottom: 10px;">
                     Relatief over alle 4 dagen (voor optimale vergelijking)
@@ -270,92 +273,81 @@
     </div>
 
     <script>
-        // Nederlandse locatie (centrum Nederland - Utrecht)
+        // Nederlandse locatie (centrum Nederland - Utrecht) - voor weer
         const LAT = 52.0907;
         const LON = 5.1214;
         
-        // ENTSO-E API key (moet je aanvragen - zie instructies)
-        const ENTSOE_API_KEY = localStorage.getItem('entsoe_api_key') || '';
+        // Enever.nl API token (gratis aanmaken op enever.nl/prijzenfeeds)
+        const ENEVER_TOKEN = localStorage.getItem('enever_token') || '';
         
-        // Baseprijs winter (feb 2026) - voor voorspelling
-        const BASE_PRICE = 0.15;
+        // Baseprijs voor voorspelling (Frank Energie all-in niveau, feb 2026)
+        // Beursprijs ~€0,12 + energiebelasting €0,127 + netbeheer €0,06 + opslag €0,02 + BTW = ~€0,28
+        const BASE_PRICE = 0.28;
         
         async function fetchDayAheadPrices() {
-            if (!ENTSOE_API_KEY) {
-                console.log('Geen ENTSO-E API key, gebruik voorspelling');
+            if (!ENEVER_TOKEN) {
+                console.log('Geen Enever token, gebruik voorspelling');
                 return null;
             }
             
             try {
-                // ENTSO-E gebied code voor Nederland
-                const DOMAIN = '10YNL----------L';
+                // Haal vandaag en morgen prijzen op - filter op Frank Energie
+                const [todayResponse, tomorrowResponse] = await Promise.all([
+                    fetch(`https://enever.nl/apiv3/stroomprijs_vandaag.php?token=${ENEVER_TOKEN}&price=prijsFR`),
+                    fetch(`https://enever.nl/apiv3/stroomprijs_morgen.php?token=${ENEVER_TOKEN}&price=prijsFR`)
+                ]);
                 
-                // Vandaag 00:00 tot overmorgen 23:59
-                const now = new Date();
-                const start = new Date(now);
-                start.setHours(0, 0, 0, 0);
-                const end = new Date(start);
-                end.setDate(end.getDate() + 2);
-                end.setHours(23, 59, 59, 999);
-                
-                // ENTSO-E date format: YYYYMMDDHHMM
-                const formatDate = (d) => {
-                    const pad = (n) => String(n).padStart(2, '0');
-                    return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}`;
-                };
-                
-                const url = `https://web-api.tp.entsoe.eu/api?` +
-                    `securityToken=${ENTSOE_API_KEY}` +
-                    `&documentType=A44` +
-                    `&in_Domain=${DOMAIN}` +
-                    `&out_Domain=${DOMAIN}` +
-                    `&periodStart=${formatDate(start)}` +
-                    `&periodEnd=${formatDate(end)}`;
-                
-                console.log('Fetching ENTSO-E data...');
-                const response = await fetch(url);
-                
-                if (!response.ok) {
-                    console.log('ENTSO-E API fout:', response.status);
+                if (!todayResponse.ok) {
+                    console.error('Enever API fout vandaag:', todayResponse.status, await todayResponse.text());
                     return null;
                 }
                 
-                const text = await response.text();
-                const parser = new DOMParser();
-                const xml = parser.parseFromString(text, 'text/xml');
+                const todayJson = await todayResponse.json();
+                console.log('Vandaag response:', todayJson);
                 
-                // Parse XML voor prijzen
-                const timeSeries = xml.querySelector('TimeSeries');
-                if (!timeSeries) {
-                    console.log('Geen TimeSeries in response');
+                let tomorrowJson = { data: [] };
+                
+                // Morgen data is pas vanaf ~15:00 beschikbaar
+                if (tomorrowResponse.ok) {
+                    tomorrowJson = await tomorrowResponse.json();
+                    console.log('Morgen response:', tomorrowJson);
+                    console.log('✅ Morgen prijzen beschikbaar');
+                } else {
+                    console.log('⏳ Morgen prijzen nog niet beschikbaar (vanaf ~15:00)');
+                }
+                
+                // Check status
+                if (todayJson.status !== "true" && todayJson.status !== true) {
+                    console.error('Enever status niet OK:', todayJson);
                     return null;
                 }
                 
-                const periods = timeSeries.querySelectorAll('Period');
+                // Combineer en converteer naar object met timestamps als keys
                 const prices = {};
                 
-                periods.forEach(period => {
-                    const startTime = period.querySelector('timeInterval start').textContent;
-                    const points = period.querySelectorAll('Point');
+                // Enever format: { status: "true", data: [{ datum: "2026-02-12T14:00:00+01:00", prijsFR: "0.210471" }] }
+                const allData = [...(todayJson.data || []), ...(tomorrowJson.data || [])];
+                
+                allData.forEach(item => {
+                    // Datum veld
+                    const timeStr = item.datum;
+                    const price = parseFloat(item.prijsFR);
                     
-                    points.forEach(point => {
-                        const position = parseInt(point.querySelector('position').textContent);
-                        const price = parseFloat(point.querySelector('price.amount').textContent) / 1000; // MWh -> kWh
+                    if (timeStr && !isNaN(price)) {
+                        // Parse datum - kan zijn: "2026-02-12T14:00:00+01:00" of "2026-02-12 14:00:00"
+                        const date = new Date(timeStr);
                         
-                        // Bereken timestamp
-                        const date = new Date(startTime);
-                        date.setHours(date.getHours() + position - 1);
+                        // Normaliseer naar ISO format voor matching
                         const timeKey = date.toISOString().split('.')[0] + 'Z';
-                        
                         prices[timeKey] = price;
-                    });
+                    }
                 });
                 
-                console.log('ENTSO-E prijzen opgehaald:', Object.keys(prices).length, 'uren');
+                console.log('✅ Frank Energie prijzen opgehaald:', Object.keys(prices).length, 'uren');
                 return prices;
                 
             } catch (error) {
-                console.error('Fout bij ophalen ENTSO-E data:', error);
+                console.error('❌ Fout bij ophalen Enever data:', error);
                 return null;
             }
         }
@@ -537,12 +529,11 @@
                 const card = document.createElement('div');
                 card.className = 'card';
                 
-                const dayLabel = dayIndex === 0 ? 'Vandaag' : 
-                               dayIndex === 1 ? 'Morgen' : 
-                               getDayName(date);
+                // Altijd dagnaam gebruiken
+                const dayLabel = getDayName(date);
                 
                 const sourceLabel = hasDayAhead ? 
-                    '✓ Echte prijzen (ENTSO-E)' : 
+                    '✓ Frank Energie' : 
                     '📊 Voorspelling (obv weer)';
                 
                 card.innerHTML = `
@@ -624,6 +615,134 @@
             });
         }
         
+        function findBestTimeBlocks(weatherData, dayAheadPrices) {
+            // Bouw lijst met alle uren en prijzen
+            const allHours = [];
+            
+            weatherData.hourly.time.forEach((time, i) => {
+                const dateObj = new Date(time);
+                const isWeekend = dateObj.getDay() === 0 || dateObj.getDay() === 6;
+                
+                // Check of we day-ahead prijs hebben
+                let price;
+                const timeKey = time.split('.')[0] + 'Z';
+                
+                if (dayAheadPrices && dayAheadPrices[timeKey]) {
+                    price = dayAheadPrices[timeKey];
+                } else {
+                    price = calculatePrice(
+                        time,
+                        weatherData.hourly.cloud_cover[i],
+                        weatherData.hourly.wind_speed_10m[i],
+                        isWeekend
+                    );
+                }
+                
+                allHours.push({ time: time, price: price });
+            });
+            
+            // Vind beste 3-uur blok
+            let best3Hour = null;
+            let best3Price = Infinity;
+            
+            for (let i = 0; i <= allHours.length - 3; i++) {
+                const avgPrice = (allHours[i].price + allHours[i+1].price + allHours[i+2].price) / 3;
+                if (avgPrice < best3Price) {
+                    best3Price = avgPrice;
+                    best3Hour = {
+                        start: allHours[i].time,
+                        end: allHours[i+2].time,
+                        avgPrice: avgPrice
+                    };
+                }
+            }
+            
+            // Vind beste 6-uur blok
+            let best6Hour = null;
+            let best6Price = Infinity;
+            
+            for (let i = 0; i <= allHours.length - 6; i++) {
+                let sum = 0;
+                for (let j = 0; j < 6; j++) {
+                    sum += allHours[i+j].price;
+                }
+                const avgPrice = sum / 6;
+                if (avgPrice < best6Price) {
+                    best6Price = avgPrice;
+                    best6Hour = {
+                        start: allHours[i].time,
+                        end: allHours[i+5].time,
+                        avgPrice: avgPrice
+                    };
+                }
+            }
+            
+            return { best3Hour, best6Hour };
+        }
+        
+        function formatDayNameTime(isoString) {
+            const date = new Date(isoString);
+            const now = new Date();
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const targetDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+            
+            const diffDays = Math.floor((targetDate - today) / (1000 * 60 * 60 * 24));
+            
+            const time = date.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' });
+            
+            // Altijd dagnaam gebruiken
+            const dayName = date.toLocaleDateString('nl-NL', { weekday: 'long' });
+            const dayNameCapitalized = dayName.charAt(0).toUpperCase() + dayName.slice(1);
+            
+            return `${dayNameCapitalized} ${time}`;
+        }
+        
+        function renderBestTimes(bestBlocks) {
+            const container = document.getElementById('bestTimes');
+            
+            if (!bestBlocks || !bestBlocks.best3Hour || !bestBlocks.best6Hour) {
+                container.style.display = 'none';
+                return;
+            }
+            
+            const { best3Hour, best6Hour } = bestBlocks;
+            
+            container.style.display = 'block';
+            container.innerHTML = `
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div style="background: rgba(255,255,255,0.15); border-radius: 10px; padding: 15px;">
+                        <div style="font-size: 24px; margin-bottom: 8px;">🧺</div>
+                        <div style="font-size: 13px; opacity: 0.9; margin-bottom: 5px;">Beste moment voor wasmachine (3u)</div>
+                        <div style="font-size: 16px; font-weight: 600; margin-bottom: 3px;">
+                            ${formatDayNameTime(best3Hour.start)}
+                        </div>
+                        <div style="font-size: 13px; opacity: 0.85;">
+                            Gemiddeld €${best3Hour.avgPrice.toFixed(3)}/kWh
+                        </div>
+                    </div>
+                    
+                    <div style="background: rgba(255,255,255,0.15); border-radius: 10px; padding: 15px;">
+                        <div style="font-size: 24px; margin-bottom: 8px;">🔌</div>
+                        <div style="font-size: 13px; opacity: 0.9; margin-bottom: 5px;">Beste moment voor auto opladen (6u)</div>
+                        <div style="font-size: 16px; font-weight: 600; margin-bottom: 3px;">
+                            ${formatDayNameTime(best6Hour.start)}
+                        </div>
+                        <div style="font-size: 13px; opacity: 0.85;">
+                            Gemiddeld €${best6Hour.avgPrice.toFixed(3)}/kWh
+                        </div>
+                    </div>
+                </div>
+                
+                <style>
+                    @media (max-width: 600px) {
+                        #bestTimes > div {
+                            grid-template-columns: 1fr !important;
+                        }
+                    }
+                </style>
+            `;
+        }
+        
         async function init() {
             const now = new Date();
             document.getElementById('updateTime').textContent = 
@@ -649,6 +768,10 @@
                 
                 renderCharts(weatherData, dayAheadPrices);
                 
+                // Toon beste tijdblokken
+                const bestBlocks = findBestTimeBlocks(weatherData, dayAheadPrices);
+                renderBestTimes(bestBlocks);
+                
             } catch (error) {
                 console.log('Fout bij laden data:', error);
                 document.getElementById('loading').textContent = 
@@ -664,24 +787,24 @@
             const infoEl = document.querySelector('.info');
             if (!hasApiKey) {
                 infoEl.innerHTML = `
-                    <strong>⚠️ ENTSO-E API key ontbreekt</strong><br>
-                    Momenteel gebruik ik alleen voorspellingen obv weer. Voor echte day-ahead prijzen (vandaag/morgen):
+                    <strong>⚠️ Enever.nl token ontbreekt</strong><br>
+                    Momenteel gebruik ik alleen voorspellingen obv weer. Voor echte Frank Energie prijzen (vandaag/morgen):
                     <br><br>
                     <button onclick="showApiKeyInstructions()" style="padding: 8px 16px; background: #667eea; color: white; border: none; border-radius: 6px; cursor: pointer;">
-                        📝 Toon instructies voor API key
+                        📝 Toon instructies voor token
                     </button>
                     <br><br>
-                    <strong>💶 Prijzen:</strong> Kale beursprijzen (excl. BTW, energiebelasting €0,09/kWh, leveranciersopslag). 
-                    Je daadwerkelijke prijs is ongeveer 60-80% hoger. Bijv. €0,15 wordt ~€0,26 all-in.
+                    <strong>💶 Prijzen:</strong> Frank Energie all-in (incl. BTW, energiebelasting, netbeheer, opslag). 
+                    Dit is wat je echt betaalt per kWh.
                     <br><br>
                     <strong>Patroon:</strong> Veel zon/wind = lagere prijzen. Weinig zon/wind + avondspits = hogere prijzen.
                 `;
             } else {
                 infoEl.innerHTML = `
-                    <strong>✅ ENTSO-E API actief</strong> - Vandaag en morgen gebruiken echte day-ahead prijzen (vanaf ~13:00 beschikbaar).
+                    <strong>✅ Frank Energie actief</strong> - Vandaag en morgen gebruiken echte all-in prijzen (morgen vanaf ~15:00).
                     <br><br>
-                    <strong>💶 Prijzen:</strong> Kale beursprijzen (excl. BTW, energiebelasting €0,09/kWh, leveranciersopslag). 
-                    Je daadwerkelijke prijs is ongeveer 60-80% hoger. Bijv. €0,15 wordt ~€0,26 all-in.
+                    <strong>💶 Prijzen:</strong> Frank Energie all-in (incl. BTW, energiebelasting €0,127/kWh, netbeheer, opslag €0,02/kWh). 
+                    Dit is wat je echt betaalt per kWh.
                     <br><br>
                     <strong>Labels:</strong> Goedkoop/Middel/Duur zijn relatief over alle 4 dagen. Zo kun je optimaal vergelijken.
                 `;
@@ -693,21 +816,23 @@
             modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;';
             modal.innerHTML = `
                 <div style="background: white; border-radius: 16px; padding: 30px; max-width: 600px; max-height: 80vh; overflow-y: auto;">
-                    <h2 style="margin-top: 0;">🔑 ENTSO-E API Key aanvragen</h2>
+                    <h2 style="margin-top: 0;">🔑 Enever.nl Token aanmaken</h2>
                     
-                    <p><strong>Stap 1:</strong> Registreer op <a href="https://transparency.entsoe.eu/usrm/user/createPublicUser" target="_blank" style="color: #667eea;">ENTSO-E Transparency Platform</a></p>
+                    <p><strong>Stap 1:</strong> Ga naar <a href="https://enever.nl/prijzenfeeds/" target="_blank" style="color: #667eea;">enever.nl/prijzenfeeds</a></p>
                     
-                    <p><strong>Stap 2:</strong> Stuur email naar <strong>transparency@entsoe.eu</strong> met:</p>
-                    <ul>
-                        <li>Onderwerp: "Restful API access"</li>
-                        <li>Inhoud: "I would like to request API access for personal use. My registered email is: [jouw email]"</li>
-                    </ul>
+                    <p><strong>Stap 2:</strong> Scroll naar beneden naar "Token aanmaken"</p>
                     
-                    <p><strong>Stap 3:</strong> Wacht 1-3 dagen op email met API key</p>
+                    <p><strong>Stap 3:</strong> Vul je emailadres in en klik "Verstuur"</p>
                     
-                    <p><strong>Stap 4:</strong> Voer je API key hieronder in (wordt lokaal opgeslagen):</p>
+                    <p><strong>Stap 4:</strong> Je token verschijnt direct op de pagina (geen email nodig!)</p>
                     
-                    <input type="text" id="apiKeyInput" placeholder="Plak hier je API key" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px; margin-bottom: 15px;">
+                    <p><strong>Stap 5:</strong> Kopieer de token en plak hem hieronder:</p>
+                    
+                    <input type="text" id="apiKeyInput" placeholder="Plak hier je Enever token" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px; margin-bottom: 15px;">
+                    
+                    <div style="font-size: 12px; color: #666; margin-bottom: 15px;">
+                        💡 Dit is 100% gratis en duurt maar 30 seconden
+                    </div>
                     
                     <div style="display: flex; gap: 10px;">
                         <button onclick="saveApiKey()" style="flex: 1; padding: 12px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600;">
@@ -725,10 +850,10 @@
         function saveApiKey() {
             const key = document.getElementById('apiKeyInput').value.trim();
             if (key) {
-                localStorage.setItem('entsoe_api_key', key);
+                localStorage.setItem('enever_token', key);
                 location.reload();
             } else {
-                alert('Voer een geldige API key in');
+                alert('Voer een geldige token in');
             }
         }
         
