@@ -273,6 +273,23 @@
     </div>
 
     <script>
+        // Debug: check localStorage status
+        function checkTokenStatus() {
+            const token = localStorage.getItem('enever_token');
+            console.log('=== TOKEN DEBUG ===');
+            console.log('Token aanwezig:', !!token);
+            console.log('Token lengte:', token ? token.length : 0);
+            console.log('Token preview:', token ? token.substring(0, 20) + '...' : 'geen token');
+            console.log('localStorage werkt:', typeof(Storage) !== "undefined");
+            console.log('==================');
+            return token;
+        }
+        
+        // Roep dit aan bij laden
+        window.addEventListener('DOMContentLoaded', () => {
+            checkTokenStatus();
+        });
+        
         // Nederlandse locatie (centrum Nederland - Utrecht) - voor weer
         const LAT = 52.0907;
         const LON = 5.1214;
@@ -785,7 +802,19 @@
         
         function updateInfoBanner(hasApiKey) {
             const infoEl = document.querySelector('.info');
+            const isFileProtocol = window.location.protocol === 'file:';
+            
             if (!hasApiKey) {
+                let warningText = '';
+                if (isFileProtocol) {
+                    warningText = `
+                        <br><br>
+                        <strong>⚠️ Let op:</strong> Je draait de app lokaal (file://). localStorage werkt mogelijk niet goed.
+                        <br>
+                        <strong>Oplossing:</strong> Upload naar GitHub Pages of draai via localhost (zie instructies).
+                    `;
+                }
+                
                 infoEl.innerHTML = `
                     <strong>⚠️ Enever.nl token ontbreekt</strong><br>
                     Momenteel gebruik ik alleen voorspellingen obv weer. Voor echte Frank Energie prijzen (vandaag/morgen):
@@ -793,6 +822,7 @@
                     <button onclick="showApiKeyInstructions()" style="padding: 8px 16px; background: #667eea; color: white; border: none; border-radius: 6px; cursor: pointer;">
                         📝 Toon instructies voor token
                     </button>
+                    ${warningText}
                     <br><br>
                     <strong>💶 Prijzen:</strong> Frank Energie all-in (incl. BTW, energiebelasting, netbeheer, opslag). 
                     Dit is wat je echt betaalt per kWh.
@@ -849,11 +879,27 @@
         
         function saveApiKey() {
             const key = document.getElementById('apiKeyInput').value.trim();
-            if (key) {
+            if (!key) {
+                alert('❌ Voer een geldige token in');
+                return;
+            }
+            
+            try {
                 localStorage.setItem('enever_token', key);
-                location.reload();
-            } else {
-                alert('Voer een geldige token in');
+                
+                // Verificeer dat het opgeslagen is
+                const saved = localStorage.getItem('enever_token');
+                if (saved === key) {
+                    console.log('✅ Token opgeslagen:', key.substring(0, 20) + '...');
+                    alert('✅ Token opgeslagen! App wordt herlaad...');
+                    location.reload();
+                } else {
+                    console.error('❌ Token opslaan mislukt - localStorage werkt niet');
+                    alert('❌ Fout: localStorage werkt niet (file:// protocol?).\n\nOplossing: Upload naar GitHub Pages of draai via localhost.');
+                }
+            } catch (error) {
+                console.error('❌ localStorage error:', error);
+                alert('❌ Fout bij opslaan: ' + error.message);
             }
         }
         
