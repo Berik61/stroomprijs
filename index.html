@@ -184,9 +184,16 @@
             background: #eff6ff;
             padding: 15px;
             border-radius: 8px;
-            font-size: 13px;
+            font-size: 14px;
             color: #1e40af;
             line-height: 1.6;
+        }
+        
+        @media (max-width: 600px) {
+            .info {
+                font-size: 15px;
+                padding: 18px;
+            }
         }
         
         .weather-info {
@@ -360,6 +367,11 @@
                         // Normaliseer naar ISO format voor matching
                         const timeKey = date.toISOString().split('.')[0] + 'Z';
                         prices[timeKey] = price;
+                        
+                        // Debug: toon eerste 3 voor vergelijking
+                        if (Object.keys(prices).length <= 3) {
+                            console.log('Enever tijd:', timeStr, '→ timeKey:', timeKey);
+                        }
                     }
                 });
                 
@@ -490,6 +502,8 @@
                 actual: []
             };
             
+            let debugCount = 0;
+            
             weatherData.hourly.time.forEach((time, i) => {
                 const date = time.split('T')[0];
                 if (!dayData[date]) {
@@ -508,7 +522,29 @@
                 // Check of we day-ahead prijs hebben
                 let price;
                 let source;
-                const timeKey = time.split('.')[0] + 'Z';
+                
+                // Open-Meteo geeft Nederlandse tijd (Europe/Amsterdam) maar zonder timezone marker
+                // We moeten dit converteren naar UTC voor matching met Enever prijzen
+                // Detecteer of we in wintertijd (CET, +01:00) of zomertijd (CEST, +02:00) zitten
+                const testDate = new Date(time);
+                const jan = new Date(testDate.getFullYear(), 0, 1);
+                const jul = new Date(testDate.getFullYear(), 6, 1);
+                const stdOffset = Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
+                const isDST = testDate.getTimezoneOffset() < stdOffset;
+                const tzOffset = isDST ? '+02:00' : '+01:00';
+                
+                const timeAsDate = new Date(time + tzOffset);
+                const timeKey = timeAsDate.toISOString().split('.')[0] + 'Z';
+                
+                // Debug: toon eerste 3 voor vergelijking
+                if (debugCount < 3) {
+                    console.log('Open-Meteo tijd:', time, '(TZ:', tzOffset + ') → timeKey:', timeKey);
+                    console.log('  Heeft day-ahead?', dayAheadPrices && dayAheadPrices[timeKey] !== undefined);
+                    if (dayAheadPrices) {
+                        console.log('  Eerste Enever keys:', Object.keys(dayAheadPrices).slice(0, 3));
+                    }
+                    debugCount++;
+                }
                 
                 if (dayAheadPrices && dayAheadPrices[timeKey]) {
                     // Echte prijs beschikbaar
