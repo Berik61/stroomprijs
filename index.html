@@ -308,10 +308,13 @@
             }
             
             try {
+                // CORS proxy om GitHub Pages CORS blokkade te omzeilen
+                const CORS_PROXY = 'https://corsproxy.io/?';
+                
                 // Haal vandaag en morgen prijzen op - filter op Frank Energie
                 const [todayResponse, tomorrowResponse] = await Promise.all([
-                    fetch(`https://enever.nl/apiv3/stroomprijs_vandaag.php?token=${ENEVER_TOKEN}&price=prijsFR`),
-                    fetch(`https://enever.nl/apiv3/stroomprijs_morgen.php?token=${ENEVER_TOKEN}&price=prijsFR`)
+                    fetch(`${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_vandaag.php?token=${ENEVER_TOKEN}&price=prijsFR`),
+                    fetch(`${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_morgen.php?token=${ENEVER_TOKEN}&price=prijsFR`)
                 ]);
                 
                 if (!todayResponse.ok) {
@@ -481,6 +484,12 @@
             const dayData = {};
             const allPrices = [];
             
+            // Voor calibratie: verzamel voorspelling vs echte prijs voor dag 1+2
+            const calibrationData = {
+                forecast: [],
+                actual: []
+            };
+            
             weatherData.hourly.time.forEach((time, i) => {
                 const date = time.split('T')[0];
                 if (!dayData[date]) {
@@ -502,8 +511,20 @@
                 const timeKey = time.split('.')[0] + 'Z';
                 
                 if (dayAheadPrices && dayAheadPrices[timeKey]) {
+                    // Echte prijs beschikbaar
                     price = dayAheadPrices[timeKey];
                     source = 'day-ahead';
+                    
+                    // Ook voorspelling berekenen voor calibratie
+                    const forecastPrice = calculatePrice(
+                        time,
+                        weatherData.hourly.cloud_cover[i],
+                        weatherData.hourly.wind_speed_10m[i],
+                        isWeekend
+                    );
+                    
+                    calibrationData.forecast.push(forecastPrice);
+                    calibrationData.actual.push(price);
                 } else {
                     price = calculatePrice(
                         time,
@@ -520,6 +541,43 @@
                 dayData[date].prices.push(price);
                 dayData[date].sources.push(source);
                 allPrices.push(price);
+            });
+            
+            // Bereken calibratie factor op basis van dag 1+2
+            let calibrationFactor = 1.0;
+            if (calibrationData.forecast.length > 0 && calibrationData.actual.length > 0) {
+                // Bereken gemiddelde ratio: actual / forecast
+                const ratios = calibrationData.forecast.map((f, i) => 
+                    calibrationData.actual[i] / f
+                );
+                calibrationFactor = ratios.reduce((a, b) => a + b, 0) / ratios.length;
+                
+                console.log('📊 Calibratie analyse:');
+                console.log('  - Aantal uren:', calibrationData.forecast.length);
+                console.log('  - Gem. voorspelling:', (calibrationData.forecast.reduce((a,b) => a+b, 0) / calibrationData.forecast.length).toFixed(3));
+                console.log('  - Gem. echt:', (calibrationData.actual.reduce((a,b) => a+b, 0) / calibrationData.actual.length).toFixed(3));
+                console.log('  - Correctiefactor:', calibrationFactor.toFixed(3));
+                console.log('  - Betekenis:', calibrationFactor > 1 ? 'Voorspelling te laag' : 'Voorspelling te hoog');
+            }
+            
+            // Pas calibratie toe op dag 3+4 (forecast-only dagen)
+            Object.keys(dayData).forEach((date, dayIndex) => {
+                if (dayIndex >= 2) { // Dag 3 en 4
+                    const day = dayData[date];
+                    const hasAnyDayAhead = day.sources.some(s => s === 'day-ahead');
+                    
+                    if (!hasAnyDayAhead && calibrationFactor !== 1.0) {
+                        // Pas calibratie toe
+                        day.prices = day.prices.map(p => p * calibrationFactor);
+                        console.log(`🔧 Dag ${dayIndex + 1} gecalibreerd met factor ${calibrationFactor.toFixed(3)}`);
+                    }
+                }
+            });
+            
+            // Update allPrices met gecalibreerde waarden
+            allPrices.length = 0;
+            Object.values(dayData).forEach(day => {
+                allPrices.push(...day.prices);
             });
             
             // Bereken drempelwaarden voor relatieve labels over ALLE dagen
@@ -549,9 +607,21 @@
                 // Altijd dagnaam gebruiken
                 const dayLabel = getDayName(date);
                 
-                const sourceLabel = hasDayAhead ? 
-                    '✓ Frank Energie' : 
-                    '📊 Voorspelling (obv weer)';
+                // Check of deze dag gecalibreerd is
+                const isCalibrated = dayIndex >= 2 && !hasDayAhead && calibrationFactor !== 1.0;
+                
+                let sourceLabel;
+                let sourceColor;
+                if (hasDayAhead) {
+                    sourceLabel = '✓ Frank Energie';
+                    sourceColor = '#10b981';
+                } else if (isCalibrated) {
+                    sourceLabel = `📊 Voorspelling (gecalibreerd ${calibrationFactor > 1 ? '+' : ''}${((calibrationFactor - 1) * 100).toFixed(0)}%)`;
+                    sourceColor = '#f59e0b';
+                } else {
+                    sourceLabel = '📊 Voorspelling (obv weer)';
+                    sourceColor = '#667eea';
+                }
                 
                 card.innerHTML = `
                     <div class="day-section">
@@ -560,7 +630,7 @@
                             <span class="day-info">${formatDate(date)}</span>
                         </div>
                         
-                        <div style="text-align: center; font-size: 11px; color: ${hasDayAhead ? '#10b981' : '#667eea'}; margin-bottom: 10px;">
+                        <div style="text-align: center; font-size: 11px; color: ${sourceColor}; margin-bottom: 10px;">
                             ${sourceLabel}
                         </div>
                         
@@ -630,32 +700,21 @@
                     chartEl.appendChild(bar);
                 });
             });
+            
+            return dayData; // Return voor gebruik in findBestTimeBlocks
         }
         
-        function findBestTimeBlocks(weatherData, dayAheadPrices) {
-            // Bouw lijst met alle uren en prijzen
+        function findBestTimeBlocks(dayData) {
+            // Bouw lijst met alle uren en prijzen uit reeds berekende dayData
             const allHours = [];
             
-            weatherData.hourly.time.forEach((time, i) => {
-                const dateObj = new Date(time);
-                const isWeekend = dateObj.getDay() === 0 || dateObj.getDay() === 6;
-                
-                // Check of we day-ahead prijs hebben
-                let price;
-                const timeKey = time.split('.')[0] + 'Z';
-                
-                if (dayAheadPrices && dayAheadPrices[timeKey]) {
-                    price = dayAheadPrices[timeKey];
-                } else {
-                    price = calculatePrice(
-                        time,
-                        weatherData.hourly.cloud_cover[i],
-                        weatherData.hourly.wind_speed_10m[i],
-                        isWeekend
-                    );
-                }
-                
-                allHours.push({ time: time, price: price });
+            Object.values(dayData).forEach(day => {
+                day.hours.forEach((time, i) => {
+                    allHours.push({
+                        time: time,
+                        price: day.prices[i]
+                    });
+                });
             });
             
             // Vind beste 3-uur blok
@@ -783,10 +842,10 @@
                 // Update info banner met API key status
                 updateInfoBanner(dayAheadPrices !== null);
                 
-                renderCharts(weatherData, dayAheadPrices);
+                const dayData = renderCharts(weatherData, dayAheadPrices);
                 
-                // Toon beste tijdblokken
-                const bestBlocks = findBestTimeBlocks(weatherData, dayAheadPrices);
+                // Toon beste tijdblokken (gebruikt gecalibreerde prijzen)
+                const bestBlocks = findBestTimeBlocks(dayData);
                 renderBestTimes(bestBlocks);
                 
             } catch (error) {
