@@ -371,7 +371,22 @@
                     if (!tomorrowJson.data || tomorrowJson.data.length === 0) {
                         console.warn('⚠️ Morgen data array is leeg of undefined!');
                         console.log('   Response keys:', Object.keys(tomorrowJson));
-                        console.log('   Volledige response:', JSON.stringify(tomorrowJson).substring(0, 500));
+                        console.log('   Response code:', tomorrowJson.code);
+                        
+                        // Code 5 = data niet beschikbaar, probeer zonder price filter
+                        if (tomorrowJson.code === "5") {
+                            console.log('🔄 Code 5 - Probeer morgen zonder price filter...');
+                            const tomorrowUrlNoFilter = `${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_morgen.php?token=${ENEVER_TOKEN}${cacheBust}`;
+                            const tomorrowRetry = await fetch(tomorrowUrlNoFilter);
+                            if (tomorrowRetry.ok) {
+                                const retryJson = await tomorrowRetry.json();
+                                console.log('Retry response:', retryJson);
+                                if (retryJson.data && retryJson.data.length > 0) {
+                                    console.log('✅ Zonder filter werkt wel! Gebruik deze data.');
+                                    tomorrowJson = retryJson;
+                                }
+                            }
+                        }
                     }
                     
                     console.log('✅ Morgen prijzen beschikbaar');
@@ -401,7 +416,13 @@
                 allData.forEach(item => {
                     // Datum veld
                     const timeStr = item.datum;
-                    const price = parseFloat(item.prijsFR);
+                    
+                    // Probeer prijsFR, als die er niet is probeer andere velden
+                    let price = parseFloat(item.prijsFR);
+                    if (isNaN(price)) {
+                        // Fallback naar andere prijs velden
+                        price = parseFloat(item.prijs) || parseFloat(item.prijsIN) || parseFloat(item.prijsDY);
+                    }
                     
                     if (timeStr && !isNaN(price)) {
                         // Parse datum - kan zijn: "2026-02-13T14:00:00+01:00" of "2026-02-13 14:00:00"
