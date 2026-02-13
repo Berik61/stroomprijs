@@ -338,14 +338,14 @@
                 // Cache busting: voeg timestamp toe
                 const cacheBust = `&_t=${Date.now()}`;
                 
-                // Probeer eerst met prijsFR (Frank all-in)
-                const todayUrl = `${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_vandaag.php?token=${ENEVER_TOKEN}&price=prijsFR${cacheBust}`;
-                const tomorrowUrl = `${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_morgen.php?token=${ENEVER_TOKEN}&price=prijsFR${cacheBust}`;
+                // Haal SPOTPRIJZEN op (zonder price filter) en bereken Frank all-in zelf
+                const todayUrl = `${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_vandaag.php?token=${ENEVER_TOKEN}${cacheBust}`;
+                const tomorrowUrl = `${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_morgen.php?token=${ENEVER_TOKEN}${cacheBust}`;
                 
-                console.log('📡 Fetching vandaag (Frank all-in)...');
-                console.log('📡 Fetching morgen (Frank all-in)...');
+                console.log('📡 Fetching vandaag (spotprijzen)...');
+                console.log('📡 Fetching morgen (spotprijzen)...');
                 
-                // Haal vandaag en morgen prijzen op - filter op Frank Energie
+                // Haal vandaag en morgen spotprijzen op
                 const [todayResponse, tomorrowResponse] = await Promise.all([
                     fetch(todayUrl),
                     fetch(tomorrowUrl)
@@ -360,6 +360,33 @@
                 console.log('Vandaag response:', todayJson);
                 console.log('→ Vandaag items:', todayJson.data ? todayJson.data.length : 0);
                 
+                // Bereken Frank all-in prijzen voor vandaag
+                if (todayJson.data && todayJson.data.length > 0) {
+                    console.log('🔧 Bereken Frank all-in voor vandaag...');
+                    todayJson.data = todayJson.data.map((item, idx) => {
+                        const spotPrijs = parseFloat(item.prijs) || parseFloat(item.prijsIN) || parseFloat(item.prijsDY) || 0;
+                        
+                        // Frank all-in berekening
+                        const energiebelasting = 0.127; // €0,127/kWh
+                        const netbeheer = 0.06;        // ~€0,06/kWh
+                        const frankOpslag = 0.02;      // ~€0,02/kWh
+                        const btw = 1.21;              // 21%
+                        
+                        const exclBTW = spotPrijs + energiebelasting + netbeheer + frankOpslag;
+                        const inclBTW = exclBTW * btw;
+                        
+                        if (idx < 3) {
+                            console.log(`  Spot: €${spotPrijs.toFixed(3)} → Frank: €${inclBTW.toFixed(3)}`);
+                        }
+                        
+                        return {
+                            ...item,
+                            prijsFR: inclBTW.toFixed(6)
+                        };
+                    });
+                    console.log('✅ Vandaag Frank all-in berekend');
+                }
+                
                 let tomorrowJson = { data: [] };
                 
                 // Morgen data is pas vanaf ~15:00 beschikbaar
@@ -368,57 +395,36 @@
                     console.log('Morgen response:', tomorrowJson);
                     console.log('→ Morgen items:', tomorrowJson.data ? tomorrowJson.data.length : 0);
                     
-                    // Check of morgen data leeg is (code 5)
-                    if ((!tomorrowJson.data || tomorrowJson.data.length === 0) && tomorrowJson.code === "5") {
-                        console.log('⚠️ Code 5 - prijsFR niet beschikbaar voor morgen');
-                        console.log('🔄 Haal inkoopprijs op en bereken Frank prijs zelf...');
-                        
-                        // Haal inkoopprijs op (zonder price filter)
-                        const tomorrowUrlInkoop = `${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_morgen.php?token=${ENEVER_TOKEN}${cacheBust}`;
-                        const tomorrowRetry = await fetch(tomorrowUrlInkoop);
-                        
-                        if (tomorrowRetry.ok) {
-                            const retryJson = await tomorrowRetry.json();
-                            console.log('Inkoop response:', retryJson);
-                            console.log('→ Inkoop items:', retryJson.data ? retryJson.data.length : 0);
+                    // Bereken Frank all-in prijzen voor morgen
+                    if (tomorrowJson.data && tomorrowJson.data.length > 0) {
+                        console.log('🔧 Bereken Frank all-in voor morgen...');
+                        tomorrowJson.data = tomorrowJson.data.map((item, idx) => {
+                            const spotPrijs = parseFloat(item.prijs) || parseFloat(item.prijsIN) || parseFloat(item.prijsDY) || 0;
                             
-                            if (retryJson.data && retryJson.data.length > 0) {
-                                console.log('✅ Inkoopprijzen beschikbaar - bereken Frank all-in prijs');
-                                
-                                // Converteer inkoopprijzen naar Frank all-in prijzen
-                                retryJson.data = retryJson.data.map(item => {
-                                    // Inkoop/spot prijs (kan prijs, prijsIN, prijsDY zijn)
-                                    let inkoopPrijs = parseFloat(item.prijs) || parseFloat(item.prijsIN) || parseFloat(item.prijsDY) || 0;
-                                    
-                                    // Bereken Frank all-in:
-                                    // (Inkoop + Energiebelasting + Netbeheer + Frank opslag) × BTW
-                                    const energiebelasting = 0.127; // €0,127/kWh
-                                    const netbeheer = 0.06;        // ~€0,06/kWh
-                                    const frankOpslag = 0.02;      // ~€0,02/kWh
-                                    const btw = 1.21;              // 21%
-                                    
-                                    const exclBTW = inkoopPrijs + energiebelasting + netbeheer + frankOpslag;
-                                    const inclBTW = exclBTW * btw;
-                                    
-                                    // Debug eerste 3
-                                    if (retryJson.data.indexOf(item) < 3) {
-                                        console.log(`  Inkoop: €${inkoopPrijs.toFixed(3)} → Frank: €${inclBTW.toFixed(3)}`);
-                                    }
-                                    
-                                    // Return item met prijsFR toegevoegd
-                                    return {
-                                        ...item,
-                                        prijsFR: inclBTW.toFixed(6) // Zelfde format als Enever
-                                    };
-                                });
-                                
-                                tomorrowJson = retryJson;
-                                console.log('✅ Frank all-in prijzen berekend voor morgen');
+                            // Frank all-in berekening
+                            const energiebelasting = 0.127;
+                            const netbeheer = 0.06;
+                            const frankOpslag = 0.02;
+                            const btw = 1.21;
+                            
+                            const exclBTW = spotPrijs + energiebelasting + netbeheer + frankOpslag;
+                            const inclBTW = exclBTW * btw;
+                            
+                            if (idx < 3) {
+                                console.log(`  Spot: €${spotPrijs.toFixed(3)} → Frank: €${inclBTW.toFixed(3)}`);
                             }
-                        }
+                            
+                            return {
+                                ...item,
+                                prijsFR: inclBTW.toFixed(6)
+                            };
+                        });
+                        console.log('✅ Morgen Frank all-in berekend');
+                    } else {
+                        console.log('⏳ Morgen spotprijzen nog niet beschikbaar (vanaf ~15:00)');
                     }
                     
-                    console.log('✅ Morgen prijzen beschikbaar');
+                    console.log('✅ Morgen prijzen verwerkt');
                 } else {
                     console.log('⏳ Morgen prijzen nog niet beschikbaar (vanaf ~15:00)');
                     console.log('   Status:', tomorrowResponse.status, tomorrowResponse.statusText);
