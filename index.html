@@ -348,6 +348,7 @@
                 
                 const todayJson = await todayResponse.json();
                 console.log('Vandaag response:', todayJson);
+                console.log('→ Vandaag items:', todayJson.data ? todayJson.data.length : 0);
                 
                 let tomorrowJson = { data: [] };
                 
@@ -355,22 +356,29 @@
                 if (tomorrowResponse.ok) {
                     tomorrowJson = await tomorrowResponse.json();
                     console.log('Morgen response:', tomorrowJson);
+                    console.log('→ Morgen items:', tomorrowJson.data ? tomorrowJson.data.length : 0);
                     console.log('✅ Morgen prijzen beschikbaar');
                 } else {
                     console.log('⏳ Morgen prijzen nog niet beschikbaar (vanaf ~15:00)');
                 }
                 
-                // Check status
+                // Check status van beide responses
                 if (todayJson.status !== "true" && todayJson.status !== true) {
-                    console.error('Enever status niet OK:', todayJson);
+                    console.error('Enever vandaag status niet OK:', todayJson);
                     return null;
+                }
+                
+                if (tomorrowJson.status && tomorrowJson.status !== "true" && tomorrowJson.status !== true) {
+                    console.error('Enever morgen status niet OK:', tomorrowJson);
+                    // Gebruik wel de vandaag data
                 }
                 
                 // Combineer en converteer naar object met timestamps als keys
                 const prices = {};
                 
-                // Enever format: { status: "true", data: [{ datum: "2026-02-12T14:00:00+01:00", prijsFR: "0.210471" }] }
+                // Enever format: { status: "true", data: [{ datum: "2026-02-13T14:00:00+01:00", prijsFR: "0.210471" }] }
                 const allData = [...(todayJson.data || []), ...(tomorrowJson.data || [])];
+                console.log('→ Totaal gecombineerd:', allData.length, 'items');
                 
                 allData.forEach(item => {
                     // Datum veld
@@ -378,7 +386,7 @@
                     const price = parseFloat(item.prijsFR);
                     
                     if (timeStr && !isNaN(price)) {
-                        // Parse datum - kan zijn: "2026-02-12T14:00:00+01:00" of "2026-02-12 14:00:00"
+                        // Parse datum - kan zijn: "2026-02-13T14:00:00+01:00" of "2026-02-13 14:00:00"
                         const date = new Date(timeStr);
                         
                         // Normaliseer naar ISO format voor matching
@@ -387,7 +395,11 @@
                         
                         // Debug: toon eerste 3 voor vergelijking
                         if (Object.keys(prices).length <= 3) {
-                            console.log('Enever tijd:', timeStr, '→ timeKey:', timeKey);
+                            console.log('  Enever tijd:', timeStr, '→ timeKey:', timeKey, '→ prijs: €' + price.toFixed(3));
+                        }
+                    } else {
+                        if (Object.keys(prices).length < 3) {
+                            console.warn('  ⚠️ Overgeslagen:', item, '(geen datum of prijs)');
                         }
                     }
                 });
@@ -967,11 +979,42 @@
                     <strong>✅ Frank Energie actief</strong> - Vandaag en morgen gebruiken echte all-in prijzen (morgen vanaf ~15:00).
                     ${shareInfo}
                     <br><br>
+                    <button onclick="generateShareLink()" style="padding: 8px 16px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer; margin-top: 8px;">
+                        🔗 Deel link voor andere apparaten
+                    </button>
+                    <br><br>
                     <strong>💶 Prijzen:</strong> Frank Energie all-in (incl. BTW, energiebelasting €0,127/kWh, netbeheer, opslag €0,02/kWh). 
                     Dit is wat je echt betaalt per kWh.
                     <br><br>
                     <strong>Labels:</strong> Goedkoop/Middel/Duur zijn relatief over alle 4 dagen. Zo kun je optimaal vergelijken.
                 `;
+            }
+        }
+        
+        function generateShareLink() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const urlToken = urlParams.get('token');
+            const storedToken = localStorage.getItem('enever_token');
+            const token = urlToken || storedToken || ENEVER_TOKEN;
+            
+            if (!token) {
+                alert('❌ Geen token gevonden!');
+                return;
+            }
+            
+            const shareUrl = window.location.origin + window.location.pathname + '?token=' + encodeURIComponent(token);
+            
+            // Probeer te kopiëren naar clipboard
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(shareUrl).then(() => {
+                    alert('✅ Link gekopieerd naar clipboard!\n\n' + shareUrl + '\n\nStuur deze link naar je andere apparaten (bijv. iPhone van je vrouw).\n\nZij kan de link bookmarken en hoeft nooit meer de token in te voeren.');
+                }).catch(() => {
+                    // Fallback: toon gewoon de link
+                    prompt('📱 Kopieer deze link en stuur naar je andere apparaten:', shareUrl);
+                });
+            } else {
+                // Fallback: toon gewoon de link
+                prompt('📱 Kopieer deze link en stuur naar je andere apparaten:', shareUrl);
             }
         }
         
