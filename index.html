@@ -338,11 +338,12 @@
                 // Cache busting: voeg timestamp toe
                 const cacheBust = `&_t=${Date.now()}`;
                 
+                // Probeer eerst met prijsFR (Frank all-in)
                 const todayUrl = `${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_vandaag.php?token=${ENEVER_TOKEN}&price=prijsFR${cacheBust}`;
                 const tomorrowUrl = `${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_morgen.php?token=${ENEVER_TOKEN}&price=prijsFR${cacheBust}`;
                 
-                console.log('📡 Fetching vandaag:', todayUrl.replace(ENEVER_TOKEN, '***').replace(cacheBust, '&_t=***'));
-                console.log('📡 Fetching morgen:', tomorrowUrl.replace(ENEVER_TOKEN, '***').replace(cacheBust, '&_t=***'));
+                console.log('📡 Fetching vandaag (Frank all-in)...');
+                console.log('📡 Fetching morgen (Frank all-in)...');
                 
                 // Haal vandaag en morgen prijzen op - filter op Frank Energie
                 const [todayResponse, tomorrowResponse] = await Promise.all([
@@ -367,24 +368,52 @@
                     console.log('Morgen response:', tomorrowJson);
                     console.log('→ Morgen items:', tomorrowJson.data ? tomorrowJson.data.length : 0);
                     
-                    // Debug: toon wat er in de response zit
-                    if (!tomorrowJson.data || tomorrowJson.data.length === 0) {
-                        console.warn('⚠️ Morgen data array is leeg of undefined!');
-                        console.log('   Response keys:', Object.keys(tomorrowJson));
-                        console.log('   Response code:', tomorrowJson.code);
+                    // Check of morgen data leeg is (code 5)
+                    if ((!tomorrowJson.data || tomorrowJson.data.length === 0) && tomorrowJson.code === "5") {
+                        console.log('⚠️ Code 5 - prijsFR niet beschikbaar voor morgen');
+                        console.log('🔄 Haal inkoopprijs op en bereken Frank prijs zelf...');
                         
-                        // Code 5 = data niet beschikbaar, probeer zonder price filter
-                        if (tomorrowJson.code === "5") {
-                            console.log('🔄 Code 5 - Probeer morgen zonder price filter...');
-                            const tomorrowUrlNoFilter = `${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_morgen.php?token=${ENEVER_TOKEN}${cacheBust}`;
-                            const tomorrowRetry = await fetch(tomorrowUrlNoFilter);
-                            if (tomorrowRetry.ok) {
-                                const retryJson = await tomorrowRetry.json();
-                                console.log('Retry response:', retryJson);
-                                if (retryJson.data && retryJson.data.length > 0) {
-                                    console.log('✅ Zonder filter werkt wel! Gebruik deze data.');
-                                    tomorrowJson = retryJson;
-                                }
+                        // Haal inkoopprijs op (zonder price filter)
+                        const tomorrowUrlInkoop = `${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_morgen.php?token=${ENEVER_TOKEN}${cacheBust}`;
+                        const tomorrowRetry = await fetch(tomorrowUrlInkoop);
+                        
+                        if (tomorrowRetry.ok) {
+                            const retryJson = await tomorrowRetry.json();
+                            console.log('Inkoop response:', retryJson);
+                            console.log('→ Inkoop items:', retryJson.data ? retryJson.data.length : 0);
+                            
+                            if (retryJson.data && retryJson.data.length > 0) {
+                                console.log('✅ Inkoopprijzen beschikbaar - bereken Frank all-in prijs');
+                                
+                                // Converteer inkoopprijzen naar Frank all-in prijzen
+                                retryJson.data = retryJson.data.map(item => {
+                                    // Inkoop/spot prijs (kan prijs, prijsIN, prijsDY zijn)
+                                    let inkoopPrijs = parseFloat(item.prijs) || parseFloat(item.prijsIN) || parseFloat(item.prijsDY) || 0;
+                                    
+                                    // Bereken Frank all-in:
+                                    // (Inkoop + Energiebelasting + Netbeheer + Frank opslag) × BTW
+                                    const energiebelasting = 0.127; // €0,127/kWh
+                                    const netbeheer = 0.06;        // ~€0,06/kWh
+                                    const frankOpslag = 0.02;      // ~€0,02/kWh
+                                    const btw = 1.21;              // 21%
+                                    
+                                    const exclBTW = inkoopPrijs + energiebelasting + netbeheer + frankOpslag;
+                                    const inclBTW = exclBTW * btw;
+                                    
+                                    // Debug eerste 3
+                                    if (retryJson.data.indexOf(item) < 3) {
+                                        console.log(`  Inkoop: €${inkoopPrijs.toFixed(3)} → Frank: €${inclBTW.toFixed(3)}`);
+                                    }
+                                    
+                                    // Return item met prijsFR toegevoegd
+                                    return {
+                                        ...item,
+                                        prijsFR: inclBTW.toFixed(6) // Zelfde format als Enever
+                                    };
+                                });
+                                
+                                tomorrowJson = retryJson;
+                                console.log('✅ Frank all-in prijzen berekend voor morgen');
                             }
                         }
                     }
