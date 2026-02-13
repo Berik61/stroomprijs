@@ -297,12 +297,29 @@
             checkTokenStatus();
         });
         
+        // Check URL parameter voor token (voor delen tussen apparaten)
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlToken = urlParams.get('token');
+        
         // Nederlandse locatie (centrum Nederland - Utrecht) - voor weer
         const LAT = 52.0907;
         const LON = 5.1214;
         
         // Enever.nl API token (gratis aanmaken op enever.nl/prijzenfeeds)
-        const ENEVER_TOKEN = localStorage.getItem('enever_token') || '';
+        // Prioriteit: URL parameter > localStorage
+        let ENEVER_TOKEN = '';
+        if (urlToken) {
+            ENEVER_TOKEN = urlToken;
+            // Sla ook op in localStorage voor volgende keer
+            try {
+                localStorage.setItem('enever_token', urlToken);
+                console.log('✅ Token uit URL opgeslagen in localStorage');
+            } catch (e) {
+                console.warn('⚠️ Kon token niet opslaan in localStorage:', e);
+            }
+        } else {
+            ENEVER_TOKEN = localStorage.getItem('enever_token') || '';
+        }
         
         // Baseprijs voor voorspelling (Frank Energie all-in niveau, feb 2026)
         // Beursprijs ~€0,12 + energiebelasting €0,127 + netbeheer €0,06 + opslag €0,02 + BTW = ~€0,28
@@ -640,8 +657,16 @@
                 const card = document.createElement('div');
                 card.className = 'card';
                 
-                // Altijd dagnaam gebruiken
-                const dayLabel = getDayName(date);
+                // Dag 1 = Vandaag, rest = dagnaam
+                const dayLabel = dayIndex === 0 ? 'Vandaag' : getDayName(date);
+                
+                // Volledige datum voor visuele controle
+                const fullDate = new Date(date);
+                const dateLabel = fullDate.toLocaleDateString('nl-NL', { 
+                    day: 'numeric', 
+                    month: 'long',
+                    year: 'numeric'
+                });
                 
                 // Check of deze dag gecalibreerd is
                 const isCalibrated = dayIndex >= 2 && !hasDayAhead && calibrationFactor !== 1.0;
@@ -663,7 +688,7 @@
                     <div class="day-section">
                         <div class="day-header">
                             <span>${dayLabel}</span>
-                            <span class="day-info">${formatDate(date)}</span>
+                            <span class="day-info">${dateLabel}</span>
                         </div>
                         
                         <div style="text-align: center; font-size: 11px; color: ${sourceColor}; margin-bottom: 10px;">
@@ -802,7 +827,11 @@
             
             const time = date.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' });
             
-            // Altijd dagnaam gebruiken
+            // Vandaag voor dag 0, rest dagnaam
+            if (diffDays === 0) {
+                return `Vandaag ${time}`;
+            }
+            
             const dayName = date.toLocaleDateString('nl-NL', { weekday: 'long' });
             const dayNameCapitalized = dayName.charAt(0).toUpperCase() + dayName.slice(1);
             
@@ -898,6 +927,7 @@
         function updateInfoBanner(hasApiKey) {
             const infoEl = document.querySelector('.info');
             const isFileProtocol = window.location.protocol === 'file:';
+            const hasUrlToken = new URLSearchParams(window.location.search).has('token');
             
             if (!hasApiKey) {
                 let warningText = '';
@@ -925,8 +955,17 @@
                     <strong>Patroon:</strong> Veel zon/wind = lagere prijzen. Weinig zon/wind + avondspits = hogere prijzen.
                 `;
             } else {
+                let shareInfo = '';
+                if (hasUrlToken) {
+                    shareInfo = `
+                        <br><br>
+                        <strong>📱 Andere apparaten:</strong> Deze link bevat je token - bookmark hem op je andere apparaten!
+                    `;
+                }
+                
                 infoEl.innerHTML = `
                     <strong>✅ Frank Energie actief</strong> - Vandaag en morgen gebruiken echte all-in prijzen (morgen vanaf ~15:00).
+                    ${shareInfo}
                     <br><br>
                     <strong>💶 Prijzen:</strong> Frank Energie all-in (incl. BTW, energiebelasting €0,127/kWh, netbeheer, opslag €0,02/kWh). 
                     Dit is wat je echt betaalt per kWh.
@@ -986,15 +1025,32 @@
                 const saved = localStorage.getItem('enever_token');
                 if (saved === key) {
                     console.log('✅ Token opgeslagen:', key.substring(0, 20) + '...');
-                    alert('✅ Token opgeslagen! App wordt herlaad...');
+                    
+                    // Genereer deelbare link voor andere apparaten
+                    const shareUrl = window.location.origin + window.location.pathname + '?token=' + encodeURIComponent(key);
+                    
+                    alert(`✅ Token opgeslagen!\n\n💡 TIP: Wil je de app op een ander apparaat gebruiken?\nGebruik deze link:\n\n${shareUrl}\n\nDe token wordt dan automatisch ingevuld.`);
+                    
                     location.reload();
                 } else {
                     console.error('❌ Token opslaan mislukt - localStorage werkt niet');
-                    alert('❌ Fout: localStorage werkt niet (file:// protocol?).\n\nOplossing: Upload naar GitHub Pages of draai via localhost.');
+                    
+                    // Fallback: gebruik URL parameter
+                    const shareUrl = window.location.origin + window.location.pathname + '?token=' + encodeURIComponent(key);
+                    
+                    if (confirm('❌ localStorage werkt niet (Private Mode?).\n\n💡 Oplossing: Gebruik deze link:\n\n' + shareUrl + '\n\nKlik OK om deze link te openen (bookmark deze!)')) {
+                        window.location.href = shareUrl;
+                    }
                 }
             } catch (error) {
                 console.error('❌ localStorage error:', error);
-                alert('❌ Fout bij opslaan: ' + error.message);
+                
+                // Fallback: gebruik URL parameter
+                const shareUrl = window.location.origin + window.location.pathname + '?token=' + encodeURIComponent(key);
+                
+                if (confirm('❌ Fout bij opslaan: ' + error.message + '\n\n💡 Oplossing: Gebruik deze link:\n\n' + shareUrl + '\n\nKlik OK om deze link te openen (bookmark deze!)')) {
+                    window.location.href = shareUrl;
+                }
             }
         }
         
