@@ -335,10 +335,19 @@
                 // CORS proxy om GitHub Pages CORS blokkade te omzeilen
                 const CORS_PROXY = 'https://corsproxy.io/?';
                 
+                // Cache busting: voeg timestamp toe
+                const cacheBust = `&_t=${Date.now()}`;
+                
+                const todayUrl = `${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_vandaag.php?token=${ENEVER_TOKEN}&price=prijsFR${cacheBust}`;
+                const tomorrowUrl = `${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_morgen.php?token=${ENEVER_TOKEN}&price=prijsFR${cacheBust}`;
+                
+                console.log('📡 Fetching vandaag:', todayUrl.replace(ENEVER_TOKEN, '***').replace(cacheBust, '&_t=***'));
+                console.log('📡 Fetching morgen:', tomorrowUrl.replace(ENEVER_TOKEN, '***').replace(cacheBust, '&_t=***'));
+                
                 // Haal vandaag en morgen prijzen op - filter op Frank Energie
                 const [todayResponse, tomorrowResponse] = await Promise.all([
-                    fetch(`${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_vandaag.php?token=${ENEVER_TOKEN}&price=prijsFR`),
-                    fetch(`${CORS_PROXY}https://enever.nl/apiv3/stroomprijs_morgen.php?token=${ENEVER_TOKEN}&price=prijsFR`)
+                    fetch(todayUrl),
+                    fetch(tomorrowUrl)
                 ]);
                 
                 if (!todayResponse.ok) {
@@ -357,9 +366,18 @@
                     tomorrowJson = await tomorrowResponse.json();
                     console.log('Morgen response:', tomorrowJson);
                     console.log('→ Morgen items:', tomorrowJson.data ? tomorrowJson.data.length : 0);
+                    
+                    // Debug: toon wat er in de response zit
+                    if (!tomorrowJson.data || tomorrowJson.data.length === 0) {
+                        console.warn('⚠️ Morgen data array is leeg of undefined!');
+                        console.log('   Response keys:', Object.keys(tomorrowJson));
+                        console.log('   Volledige response:', JSON.stringify(tomorrowJson).substring(0, 500));
+                    }
+                    
                     console.log('✅ Morgen prijzen beschikbaar');
                 } else {
                     console.log('⏳ Morgen prijzen nog niet beschikbaar (vanaf ~15:00)');
+                    console.log('   Status:', tomorrowResponse.status, tomorrowResponse.statusText);
                 }
                 
                 // Check status van beide responses
