@@ -421,7 +421,81 @@
                         });
                         console.log('✅ Morgen Frank all-in berekend');
                     } else {
-                        console.log('⏳ Morgen spotprijzen nog niet beschikbaar (vanaf ~15:00)');
+                        console.log('⚠️ Enever heeft geen morgen data - probeer ENTSO-E als fallback...');
+                        
+                        // Probeer ENTSO-E day-ahead prijzen via CORS proxy
+                        try {
+                            const tomorrow = new Date();
+                            tomorrow.setDate(tomorrow.getDate() + 1);
+                            const tomorrowStr = tomorrow.toISOString().split('T')[0].replace(/-/g, '');
+                            const todayStr = new Date().toISOString().split('T')[0].replace(/-/g, '');
+                            
+                            // ENTSO-E API: Day-ahead prijzen voor NL
+                            const entsoeUrl = `${CORS_PROXY}https://web-api.tp.entsoe.eu/api?` +
+                                `securityToken=74dde9ae-6898-4c43-a32f-e9b9129b3b95` +
+                                `&documentType=A44` +
+                                `&in_Domain=10YNL----------L` +
+                                `&out_Domain=10YNL----------L` +
+                                `&periodStart=${todayStr}2300` +
+                                `&periodEnd=${tomorrowStr}2300`;
+                            
+                            console.log('📡 Fetching ENTSO-E day-ahead...');
+                            const entsoeResponse = await fetch(entsoeUrl);
+                            
+                            if (entsoeResponse.ok) {
+                                const xmlText = await entsoeResponse.text();
+                                console.log('✅ ENTSO-E response ontvangen');
+                                
+                                // Parse XML (simpel - zoek naar <price.amount> tags)
+                                const parser = new DOMParser();
+                                const xmlDoc = parser.parseFromString(xmlText, 'text/xml');
+                                const points = xmlDoc.getElementsByTagName('Point');
+                                
+                                if (points.length > 0) {
+                                    console.log(`📊 ENTSO-E: ${points.length} prijspunten gevonden`);
+                                    
+                                    const entsoeData = [];
+                                    for (let i = 0; i < points.length && i < 24; i++) {
+                                        const priceElement = points[i].getElementsByTagName('price.amount')[0];
+                                        if (priceElement) {
+                                            const spotPrijsEur = parseFloat(priceElement.textContent) / 1000; // MWh → kWh
+                                            
+                                            // Bereken Frank all-in
+                                            const energiebelasting = 0.127;
+                                            const netbeheer = 0.06;
+                                            const frankOpslag = 0.02;
+                                            const btw = 1.21;
+                                            
+                                            const exclBTW = spotPrijsEur + energiebelasting + netbeheer + frankOpslag;
+                                            const inclBTW = exclBTW * btw;
+                                            
+                                            // Tijdstempel berekenen (morgen 00:00 + i uur)
+                                            const timestamp = new Date(tomorrow);
+                                            timestamp.setHours(i, 0, 0, 0);
+                                            
+                                            if (i < 3) {
+                                                console.log(`  ENTSO-E Spot: €${spotPrijsEur.toFixed(3)} → Frank: €${inclBTW.toFixed(3)}`);
+                                            }
+                                            
+                                            entsoeData.push({
+                                                datum: timestamp.toISOString(),
+                                                prijsFR: inclBTW.toFixed(6),
+                                                prijs: spotPrijsEur.toFixed(6)
+                                            });
+                                        }
+                                    }
+                                    
+                                    if (entsoeData.length > 0) {
+                                        tomorrowJson = { status: 'true', data: entsoeData };
+                                        console.log(`✅ ENTSO-E: ${entsoeData.length} morgen prijzen berekend`);
+                                    }
+                                }
+                            } else {
+                                console.log('❌ ENTSO-E niet beschikbaar');
+                            }
+                        } catch (entsoeError) {
+                            console.log('❌ ENTSO-E fout:', entsoeError.message);
+                        }
                     }
                     
                     console.log('✅ Morgen prijzen verwerkt');
